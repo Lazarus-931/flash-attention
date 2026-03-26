@@ -32,6 +32,7 @@ from flash_attn.cute.block_sparse_utils import (
     produce_block_sparse_loads,
     consume_block_sparse_loads,
 )
+from flash_attn.cute.turboquant import TurboQuant
 from flash_attn.cute import pipeline as pipeline_custom
 from flash_attn.cute.pack_gqa import PackGQA, pack_gqa_layout, make_packgqa_tiled_tma_atom
 from flash_attn.cute.paged_kv import PagedKVManager
@@ -55,9 +56,13 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
         paged_kv_non_tma: bool = False,
+        quantized: bool = False,
+        quantizer=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.quantized = quantized
+        self.quantizer = quantizer
         self.intra_wg_overlap = intra_wg_overlap
         self.mma_pv_is_rs = mma_pv_is_rs
         self.buffer_align_bytes = 1024
@@ -728,6 +733,8 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         self.num_threads_per_warp_group,
                         mK.element_type,
                         arch=self.arch.major * 10 + self.arch.minor,
+                        quantized=self.quantized,
+                        quantizer=self.quantizer,
                     )
 
                 load_K = partial(

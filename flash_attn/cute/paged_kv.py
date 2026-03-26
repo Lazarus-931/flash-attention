@@ -7,6 +7,7 @@ from cutlass.cute.nvgpu import cpasync
 from cutlass import Int32, const_expr
 
 from flash_attn.cute import utils
+from flash_attn.cute.turboquant import TurboQuant
 from quack.cute_dsl_utils import ParamsBase
 from cutlass.cute import FastDivmodDivisor
 
@@ -42,6 +43,9 @@ class PagedKVManager(ParamsBase):
     tKpK: cute.Tensor
     tVpV: cute.Tensor
 
+    quantized: cutlass.Constexpr[bool]
+    quantizer: TurboQuant
+
     @staticmethod
     def create(
         mPageTable: cute.Tensor,
@@ -59,6 +63,8 @@ class PagedKVManager(ParamsBase):
         num_threads: cutlass.Constexpr[Int32],
         dtype: Type[cutlass.Numeric],
         arch: cutlass.Constexpr[int] = 100,
+        quantized: cutlass.Constexpr[bool] = False,
+        quantizer: TurboQuant = None,
     ):
         # SM100 transposes V in gmem to (dv, page_size, num_pages);
         # SM90 keeps V as (page_size, dv, num_pages), same layout as K.
@@ -130,6 +136,8 @@ class PagedKVManager(ParamsBase):
             tPrPageOffset,
             tKpK,
             tVpV,
+            quantized,
+            quantizer,
         )
 
     @cute.jit
@@ -219,16 +227,42 @@ class PagedKVManager(ParamsBase):
             mX_paged_cur = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
             mX_paged_cur_copy = cute.tiled_divide(mX_paged_cur, (self.async_copy_elems,))
 
-            for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                ki = tXcX[0, 0, k][1] // self.async_copy_elems
-                mX_paged_cur_copy_ki = mX_paged_cur_copy[None, ki]
-                tXsX_k = tXsX[None, m, k]
-                mX_paged_cur_copy_ki = cute.make_tensor(
-                    mX_paged_cur_copy_ki.iterator, tXsX_k.layout
+            if const_expr(not self.quantized):
+                for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
+                    ki = tXcX[0, 0, k][1] // self.async_copy_elems
+                    mX_paged_cur_copy_ki = mX_paged_cur_copy[None, ki]
+                    tXsX_k = tXsX[None, m, k]
+                    mX_paged_cur_copy_ki = cute.make_tensor(
+                        mX_paged_cur_copy_ki.iterator, tXsX_k.layout
+                    )
+                    cute.copy(
+                        self.gmem_tiled_copy_KV,
+                        mX_paged_cur_copy_ki,
+                        tXsX_k,
+                        pred=should_load,
+                    )
+            else:
+
+                elems_per_pack = 8 // self.quantizer.num_bits
+                packed_head_dim = head_dim // elems_per_pack
+                packed_gmem_ptr = cute.make_ptr(
+                    cutlass.UInt8, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=1
                 )
-                cute.copy(
-                    self.gmem_tiled_copy_KV,
-                    mX_paged_cur_copy_ki,
-                    tXsX_k,
-                    pred=should_load,
-                )
+                mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout(((packed_head_dim),)))
+
+
+                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), cutlass.UInt8)
+                for j in cutlass.range(packed_head_dim, unroll=1):
+                    tPrPacked[j] = mX_packed[j] if row_valid else 0
+
+
+                tPrDequant = cute.make_rmem_tensor((head_dim,), self.mK_paged.element_type)
+                self.quantizer.dequantize(tPrPacked, tPrDequant, head_dim)
+
+
+                for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
+                    ki = tXcX[0, 0, k][1] // self.async_copy_elems
+                    tXsX_k = tXsX[None, m, k]
+                    for elem in cutlass.range_constexpr(cute.size(tXsX_k)):
+                        idx = ki * self.async_copy_elems + elem
+                        tXsX_k[elem] = tPrDequant[idx] if row_valid else 0

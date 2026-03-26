@@ -31,6 +31,7 @@ from cutlass.base_dsl.arch import Arch
 from cutlass.cutlass_dsl import BaseDSL
 
 from quack import copy_utils, layout_utils
+from flash_attn.cute.turboquant import TurboQuant
 
 from flash_attn.cute.paged_kv import PagedKVManager
 from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
@@ -106,7 +107,11 @@ class FlashAttentionForwardSm100:
         paged_kv_non_tma: bool = False,
         is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
+        quantized: bool = False,
+        quantizer=None,
     ):
+        self.quantized = quantized
+        self.quantizer = quantizer
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -1290,6 +1295,8 @@ class FlashAttentionForwardSm100:
                     self.head_dim_v_padded,
                     num_load_threads,
                     mK.element_type,
+                    quantized=self.quantized,
+                    quantizer=self.quantizer,
                 )
                 tKsK, tKgK = None, None
                 tVsV, tVgV = None, None

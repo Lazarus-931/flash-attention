@@ -68,6 +68,7 @@ from flash_attn.cute.block_sparsity import (
     normalize_block_sparse_config,
     normalize_block_sparse_config_bwd,
 )
+from flash_attn.cute.turboquant import TurboQuant
 
 def _parse_arch_str(arch_str):
     """Parse arch string (e.g. 'sm_80', 'sm_90a', '80', '100') to int (e.g. 80, 90, 100)."""
@@ -316,6 +317,8 @@ def _flash_attn_fwd(
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
+    num_bits: int = 32,
+
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlashAttention.
 
@@ -622,7 +625,11 @@ def _flash_attn_fwd(
         mma_pv_is_rs,
         intra_wg_overlap,
         fa_logging.get_fa_log_level(),
+        num_bits,
     )
+    quantized = num_bits < 16
+    quantizer = TurboQuant(num_bits=num_bits, dtype=dtype) if quantized else None
+
     if compile_key not in _flash_attn_fwd.compile_cache:
         (
             cu_seqlens_q_tensor,
@@ -703,6 +710,8 @@ def _flash_attn_fwd(
                 has_aux_tensors=aux_tensors is not None,
                 q_subtile_factor=q_subtile_factor,
                 paged_kv_non_tma=page_size not in [None, tile_n],
+                quantized=quantized,
+                quantizer=quantizer,
             )
         elif arch // 10 in [10, 11]:
             fa_fwd = FlashAttentionForwardSm100(
@@ -728,6 +737,8 @@ def _flash_attn_fwd(
                 is_varlen_q=cu_seqlens_q is not None or seqused_q is not None,
                 q_subtile_factor=q_subtile_factor,
                 use_2cta_instrs=use_2cta_instrs,
+                quantized=quantized,
+                quantizer=quantizer,
             )
         elif arch // 10 == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
@@ -1580,6 +1591,7 @@ class FlashAttnFunc(torch.autograd.Function):
         mask_block_idx: Optional[torch.Tensor] = None,
         block_size: Optional[Tuple[int, int]] = None,
         return_lse: bool = False,
+        num_bits: int = 32,
     ):
         # Only create block sparse tensors if at least one block sparse parameter is provided
         block_sparse_tensors = None
@@ -1606,6 +1618,7 @@ class FlashAttnFunc(torch.autograd.Function):
             mask_mod=mask_mod,
             block_sparse_tensors=block_sparse_tensors,
             return_lse=return_lse,
+            num_bits=num_bits,
         )
         ctx.save_for_backward(q, k, v, out, lse)
         ctx.softmax_scale = softmax_scale
@@ -1667,6 +1680,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         score_mod: Optional[Callable] = None,
         aux_tensors: Optional[list] = None,
         return_lse: bool = False,
+        num_bits: int = 32,
     ):
         out, lse = _flash_attn_fwd(
             q,
@@ -1690,6 +1704,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             score_mod=score_mod,
             aux_tensors=aux_tensors,
             return_lse=return_lse,
+            num_bits=num_bits,
         )
         ctx.save_for_backward(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
         ctx.softmax_scale = softmax_scale
@@ -1755,6 +1770,7 @@ def flash_attn_func(
     mask_block_idx: Optional[torch.Tensor] = None,
     block_size: Optional[Tuple[int, int]] = None,
     return_lse: bool = False,
+    num_bits: int = 32,
 ):
     return FlashAttnFunc.apply(
         q,
@@ -1775,6 +1791,7 @@ def flash_attn_func(
         mask_block_idx,
         block_size,
         return_lse,
+        num_bits,
     )
 
 
@@ -1800,6 +1817,8 @@ def flash_attn_varlen_func(
     score_mod: Optional[Callable] = None,
     aux_tensors: Optional[list] = None,
     return_lse: bool = False,
+    num_bits: int = 32
+
 ):
     return FlashAttnVarlenFunc.apply(
         q,
@@ -1823,6 +1842,7 @@ def flash_attn_varlen_func(
         score_mod,
         aux_tensors,
         return_lse,
+        num_bits,
     )
 
 
