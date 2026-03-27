@@ -23,31 +23,36 @@ class TurboQuant:
         self.num_bits = num_bits
         self.dtype = dtype
         self.entries = CODEBOOK[num_bits]
+        self.elems_per_int32 = 32 // num_bits  # e.g. 8 for 4-bit
+        self.mask = (1 << num_bits) - 1
 
     @cute.jit
     def unpack(self, packed_val: Int32, index: Int32) -> Int32:
         shift = index * self.num_bits
-        mask = (1 << self.num_bits) - 1
-        return (packed_val >> shift) & mask
+        return (packed_val >> shift) & self.mask
 
     @cute.jit
-    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor, num_elements: Int32):
-        """Dequantize packed low-bit data via codebook lookup.
+    def codebook_lookup(self, code: Int32):
+        """Compile-time unrolled codebook lookup via if/else chain."""
+        result = self.dtype(self.entries[0])
+        for c in cutlass.range_constexpr(len(self.entries)):
+            if code == c:
+                result = self.dtype(self.entries[c])
+        return result
+
+    @cute.jit
+    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor, num_int32s: Int32):
+        """Dequantize packed Int32 data via codebook lookup.
 
         Args:
-            packed_data: Register tensor of packed uint8 values.
+            packed_data: Register tensor of packed Int32 values.
             output: Register tensor to write dequantized fp16/bf16 values.
-            num_elements: Number of elements to dequantize.
+            num_int32s: Number of Int32 elements in packed_data.
         """
-        elems_per_pack = 8 // self.num_bits
-
-
-        cb = cute.make_rmem_tensor((len(self.entries),), self.dtype)
-        for i in cutlass.range_constexpr(len(self.entries)):
-            cb[i] = self.dtype(self.entries[i])
-
-        for i in cutlass.range(num_elements, unroll=1):
-            pack_idx = i // elems_per_pack
-            elem_idx = i % elems_per_pack
-            code = self.unpack(packed_data[pack_idx], elem_idx)
-            output[i] = cb[code]
+        # Fully unrolled: iterate over each Int32, unpack all sub-elements
+        for i in cutlass.range_constexpr(num_int32s):
+            packed_val = packed_data[i]
+            for j in cutlass.range_constexpr(self.elems_per_int32):
+                code = self.unpack(packed_val, j)
+                out_idx = i * self.elems_per_int32 + j
+                output[out_idx] = self.codebook_lookup(code)

@@ -243,24 +243,28 @@ class PagedKVManager(ParamsBase):
                     )
             else:
 
-                elems_per_pack = 8 // self.quantizer.num_bits
-                packed_head_dim = head_dim // elems_per_pack
+                # Vectorized load: read packed data as Int32 (4 bytes each).
+                # For 4-bit quant, head_dim=128: 64 packed bytes = 16 x Int32.
+                elems_per_int32 = 32 // self.quantizer.num_bits  # e.g. 8 for 4-bit
+                num_packed_int32 = head_dim // elems_per_int32
+
                 packed_gmem_ptr = cute.make_ptr(
-                    cutlass.Uint8, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=1
+                    Int32, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=4
                 )
-                mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout(((packed_head_dim),)))
+                mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout((num_packed_int32,)))
 
-
-                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), Int32)
+                # Load packed Int32s into registers (vectorized: each load is 4 bytes)
+                tPrPacked = cute.make_rmem_tensor((num_packed_int32,), Int32)
                 tPrPacked.fill(Int32(0))
                 if row_valid:
-                    for j in cutlass.range(packed_head_dim, unroll=1):
-                        tPrPacked[j] = Int32(mX_packed[j])
+                    for j in cutlass.range_constexpr(num_packed_int32):
+                        tPrPacked[j] = mX_packed[j]
 
+                # Dequant: unroll over Int32 chunks, unpack + codebook lookup
                 tPrDequant = cute.make_rmem_tensor((head_dim,), self.mK_paged.element_type)
-                tPrDequant.fill(self.mK_paged.element_type(0))
-                self.quantizer.dequantize(tPrPacked, tPrDequant, head_dim)
+                self.quantizer.dequantize(tPrPacked, tPrDequant, num_packed_int32)
 
+                # Store dequantized values to shared memory
                 for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     ki = tXcX[0, 0, k][1] // self.async_copy_elems
                     tXsX_k = tXsX[None, m, k]
