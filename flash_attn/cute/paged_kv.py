@@ -251,18 +251,19 @@ class PagedKVManager(ParamsBase):
                 mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout(((packed_head_dim),)))
 
 
-                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), cutlass.Uint8)
-                for j in cutlass.range(packed_head_dim, unroll=1):
-                    tPrPacked[j] = mX_packed[j] if row_valid else cutlass.Uint8(0)
-
+                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), Int32)
+                tPrPacked.fill(Int32(0))
+                if row_valid:
+                    for j in cutlass.range(packed_head_dim, unroll=1):
+                        tPrPacked[j] = Int32(mX_packed[j])
 
                 tPrDequant = cute.make_rmem_tensor((head_dim,), self.mK_paged.element_type)
+                tPrDequant.fill(self.mK_paged.element_type(0))
                 self.quantizer.dequantize(tPrPacked, tPrDequant, head_dim)
-
 
                 for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     ki = tXcX[0, 0, k][1] // self.async_copy_elems
                     tXsX_k = tXsX[None, m, k]
                     for elem in cutlass.range_constexpr(cute.size(tXsX_k)):
                         idx = ki * self.async_copy_elems + elem
-                        tXsX_k[elem] = tPrDequant[idx] if row_valid else self.mK_paged.element_type(0)
+                        tXsX_k[elem] = tPrDequant[idx]
