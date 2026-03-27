@@ -246,12 +246,12 @@ class PagedKVManager(ParamsBase):
                 elems_per_pack = 8 // self.quantizer.num_bits
                 packed_head_dim = head_dim // elems_per_pack
                 packed_gmem_ptr = cute.make_ptr(
-                    cutlass.UInt8, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=1
+                    cutlass.Uint8, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=1
                 )
                 mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout(((packed_head_dim),)))
 
 
-                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), cutlass.UInt8)
+                tPrPacked = cute.make_rmem_tensor((packed_head_dim,), cutlass.Uint8)
                 for j in cutlass.range(packed_head_dim, unroll=1):
                     tPrPacked[j] = mX_packed[j] if row_valid else 0
 
