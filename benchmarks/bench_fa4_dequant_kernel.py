@@ -26,7 +26,7 @@ def make_inputs(batch, seqlen_k, nheads_kv, headdim, page_size, dtype, device):
 
 
 def bench(batch, seqlen_q, seqlen_k, nheads, nheads_kv, headdim, page_size, dtype, device, repeats=30):
-    from flash_attn.cute.dequant_kernel import dequant_paged_kv
+    from flash_attn.cute.dequant_kernel import dequant_paged_kv, dequant_paged_kv_fused
     from flash_attn.cute import flash_attn_func
 
     packed_k, packed_v, page_table, codebook = make_inputs(
@@ -36,8 +36,8 @@ def bench(batch, seqlen_q, seqlen_k, nheads, nheads_kv, headdim, page_size, dtyp
     label = f"b={batch} sq={seqlen_q} sk={seqlen_k} h={nheads}/{nheads_kv} d={headdim}"
 
     try:
-        k_fp = dequant_paged_kv(packed_k, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
-        v_fp = dequant_paged_kv(packed_v, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
+        k_fp, v_fp = dequant_paged_kv_fused(packed_k, packed_v, page_table, codebook,
+                                             page_size, headdim, nheads_kv, seqlen_k, batch)
         flash_attn_func(q, k_fp, v_fp, causal=True, pack_gqa=False)
         torch.cuda.synchronize()
     except Exception as e:
@@ -45,31 +45,37 @@ def bench(batch, seqlen_q, seqlen_k, nheads, nheads_kv, headdim, page_size, dtyp
         traceback.print_exc()
         return
 
-    def dequant_only():
+    def dequant_separate():
         dequant_paged_kv(packed_k, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
         dequant_paged_kv(packed_v, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
 
-    def dequant_plus_attn():
-        k = dequant_paged_kv(packed_k, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
-        v = dequant_paged_kv(packed_v, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
+    def dequant_fused():
+        dequant_paged_kv_fused(packed_k, packed_v, page_table, codebook,
+                               page_size, headdim, nheads_kv, seqlen_k, batch)
+
+    def fused_plus_attn():
+        k, v = dequant_paged_kv_fused(packed_k, packed_v, page_table, codebook,
+                                       page_size, headdim, nheads_kv, seqlen_k, batch)
         flash_attn_func(q, k, v, causal=True, pack_gqa=False)
 
     def baseline_attn():
         flash_attn_func(q, k_fp, v_fp, causal=True, pack_gqa=False)
 
-    t_dq = benchmark.Timer(stmt="fn()", globals={"fn": dequant_only}, num_threads=torch.get_num_threads())
-    t_dqa = benchmark.Timer(stmt="fn()", globals={"fn": dequant_plus_attn}, num_threads=torch.get_num_threads())
+    t_sep = benchmark.Timer(stmt="fn()", globals={"fn": dequant_separate}, num_threads=torch.get_num_threads())
+    t_fused = benchmark.Timer(stmt="fn()", globals={"fn": dequant_fused}, num_threads=torch.get_num_threads())
     t_base = benchmark.Timer(stmt="fn()", globals={"fn": baseline_attn}, num_threads=torch.get_num_threads())
+    t_e2e = benchmark.Timer(stmt="fn()", globals={"fn": fused_plus_attn}, num_threads=torch.get_num_threads())
 
-    m_dq = t_dq.timeit(repeats)
+    m_sep = t_sep.timeit(repeats)
+    m_fused = t_fused.timeit(repeats)
     m_base = t_base.timeit(repeats)
-    m_dqa = t_dqa.timeit(repeats)
+    m_e2e = t_e2e.timeit(repeats)
 
     print(f"  {label}")
-    print(f"    Dequant K+V:      {m_dq.mean * 1e6:8.2f} us")
+    print(f"    Dequant 2x sep:   {m_sep.mean * 1e6:8.2f} us")
+    print(f"    Dequant fused:    {m_fused.mean * 1e6:8.2f} us  ({m_fused.mean/m_sep.mean:.2f}x of sep)")
     print(f"    Baseline FA4:     {m_base.mean * 1e6:8.2f} us")
-    print(f"    Dequant + FA4:    {m_dqa.mean * 1e6:8.2f} us")
-    print(f"    Overhead:         {(m_dqa.mean - m_base.mean) * 1e6:8.2f} us ({m_dqa.mean / m_base.mean:.2f}x)")
+    print(f"    Fused + FA4:      {m_e2e.mean * 1e6:8.2f} us  ({m_e2e.mean/m_base.mean:.2f}x of baseline)")
 
 
 def main():
