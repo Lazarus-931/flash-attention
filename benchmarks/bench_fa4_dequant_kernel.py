@@ -38,7 +38,7 @@ def bench(batch, seqlen_q, seqlen_k, nheads, nheads_kv, headdim, page_size, dtyp
     try:
         k_fp = dequant_paged_kv(packed_k, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
         v_fp = dequant_paged_kv(packed_v, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
-        flash_attn_func(q, k_fp, v_fp, causal=True)
+        flash_attn_func(q, k_fp, v_fp, causal=True, pack_gqa=False)
         torch.cuda.synchronize()
     except Exception as e:
         print(f"[FAILED] {label}: {e}")
@@ -52,10 +52,10 @@ def bench(batch, seqlen_q, seqlen_k, nheads, nheads_kv, headdim, page_size, dtyp
     def dequant_plus_attn():
         k = dequant_paged_kv(packed_k, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
         v = dequant_paged_kv(packed_v, page_table, codebook, page_size, headdim, nheads_kv, seqlen_k, batch)
-        flash_attn_func(q, k, v, causal=True)
+        flash_attn_func(q, k, v, causal=True, pack_gqa=False)
 
     def baseline_attn():
-        flash_attn_func(q, k_fp, v_fp, causal=True)
+        flash_attn_func(q, k_fp, v_fp, causal=True, pack_gqa=False)
 
     t_dq = benchmark.Timer(stmt="fn()", globals={"fn": dequant_only}, num_threads=torch.get_num_threads())
     t_dqa = benchmark.Timer(stmt="fn()", globals={"fn": dequant_plus_attn}, num_threads=torch.get_num_threads())
