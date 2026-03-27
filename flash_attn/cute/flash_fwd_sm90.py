@@ -452,9 +452,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        cb_layout = cute.make_layout((self.quantizer.num_entries if self.quantized else 1,))
-        smem_cb = smem.allocate_tensor(mK.element_type, cb_layout, byte_alignment=16)
-
         # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
 
@@ -720,12 +717,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                     tma_load_V_fn = copy_utils.tma_producer_copy_fn(tma_load_V_fn, pipeline_v)
                 else:
                     # === cp_async path (paged KV with page_size != n_block_size) ===
-                    if const_expr(self.quantized):
-                        if tidx == 0:
-                            for ci in cutlass.range_constexpr(self.quantizer.num_entries):
-                                smem_cb[ci] = mK.element_type(self.quantizer.entries[ci])
-                        cute.arch.syncthreads()
-
                     paged_kv_manager = PagedKVManager.create(
                         mPageTable,
                         mK,
@@ -744,7 +735,6 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         arch=self.arch.major * 10 + self.arch.minor,
                         quantized=self.quantized,
                         quantizer=self.quantizer,
-                        smem_codebook=smem_cb,
                     )
 
                 load_K = partial(

@@ -45,7 +45,6 @@ class PagedKVManager(ParamsBase):
 
     quantized: cutlass.Constexpr[bool]
     quantizer: TurboQuant
-    smem_codebook: cute.Tensor
 
     @staticmethod
     def create(
@@ -66,7 +65,6 @@ class PagedKVManager(ParamsBase):
         arch: cutlass.Constexpr[int] = 100,
         quantized: cutlass.Constexpr[bool] = False,
         quantizer: TurboQuant = None,
-        smem_codebook: cute.Tensor = None,
     ):
         # SM100 transposes V in gmem to (dv, page_size, num_pages);
         # SM90 keeps V as (page_size, dv, num_pages), same layout as K.
@@ -140,7 +138,6 @@ class PagedKVManager(ParamsBase):
             tVpV,
             quantized,
             quantizer,
-            smem_codebook,
         )
 
     @cute.jit
@@ -264,7 +261,7 @@ class PagedKVManager(ParamsBase):
                         tPrChunk[0] = mX_packed_row[packed_col]
 
                     tPrDeq = cute.make_rmem_tensor((elems_per_int32,), self.mK_paged.element_type)
-                    self.quantizer.dequantize(tPrChunk, tPrDeq, 1, self.smem_codebook)
+                    self.quantizer.dequantize(tPrChunk, tPrDeq, 1)
 
                     tXsX_k = tXsX[None, m, k]
                     for elem in cutlass.range_constexpr(cute.size(tXsX_k)):
