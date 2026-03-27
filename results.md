@@ -2,48 +2,66 @@
 
 Config: bf16, GQA 32/8 heads, d=128, page_size=64, causal, seqlen_q=1 (decode)
 
-## H100 80GB HBM3 (SM90)
+## H100 80GB HBM3 (SM90, 3.35 TB/s)
 
-### Fused CuTeDSL (paged KV path)
+### v5 — Fused CuTeDSL (paged KV, parallelized cb[code])
 
-Baseline (fp16 paged KV, non-TMA cp.async):
-  b=1 sk=2048: 46 us | b=1 sk=4096: 59 us | b=1 sk=8192: 111 us | b=1 sk=16384: 220 us
+Baseline (fp16 paged non-TMA):
+  b=1 sk=2048: 53 us | sk=4096: 58 us | sk=8192: 110 us | sk=16384: 217 us
 
-v1 — Byte-by-byte serial load, register codebook:
-  b=1 sk=2048: 3823 us (81x) | b=1 sk=4096: 7691 us (130x) | b=1 sk=8192: 15559 us (140x) | b=1 sk=16384: 31398 us (143x)
+TurboQuant 4-bit:
+  b=1 sk=2048: 123 us (2.3x) | sk=4096: 242 us (4.2x) | sk=8192: 483 us (4.4x) | sk=16384: 1178 us (5.4x)
 
-v2 — Int32 vectorized loads, constexpr unrolled:
-  b=1 sk=2048: 3205 us (68x) | b=1 sk=4096: 6411 us (109x) | b=1 sk=8192: 12868 us (116x) | b=1 sk=16384: 25997 us (118x)
+### v7 — Separate CUDA C kernel (non-paged FA4)
 
-v3 — Fully unrolled cb[code], codebook hoisted:
-  b=1 sk=2048: 570 us (12x) | b=1 sk=4096: 1138 us (19x) | b=1 sk=8192: 2282 us (21x) | b=1 sk=16384: 4807 us (22x)
+  b=1 sk=2048: dequant 29 + attn 62 = 90 us (1.46x)
+  b=1 sk=4096: dequant 52 + attn 59 = 104 us (1.77x)
+  b=1 sk=8192: dequant 100 + attn 100 = 201 us (2.00x)
+  b=1 sk=16384: dequant 199 + attn 193 = 390 us (2.02x)
+  b=8 sk=4096: dequant 389 + attn 105 = 495 us (4.73x)
+  b=16 sk=4096: dequant 769 + attn 204 = 971 us (4.75x)
 
-v4 — Polynomial approximation (REVERTED, slower than v3):
-  b=1 sk=2048: 2338 us (50x) | b=1 sk=4096: 4755 us (81x) | b=1 sk=8192: 9688 us (87x) | b=1 sk=16384: 19349 us (88x)
+### Findings
 
-v5 — Parallelized across thread partitions:
-  b=1 sk=2048: 122 us (2.7x) | b=1 sk=4096: 240 us (4.1x) | b=1 sk=8192: 476 us (4.3x) | b=1 sk=16384: 1135 us (5.2x)
+v7 is 1.5-2x overhead for b=1 (vs v5 at 2.3-5.4x). Dequant kernel scales linearly with total KV elements. For b=1 long sequences, dequant cost roughly equals attention cost. Batched case dominated by dequant.
 
-v6 — Shared memory codebook (FAILED, CuTeDSL limitation)
+---
 
-### Separate CUDA C kernel (non-paged FA4)
+## A100 40GB SXM4 (SM80, 2.0 TB/s)
 
-v7 — CUDA C dequant + standard flash_attn_func:
-  b=1 sk=2048: dequant 29 us + FA4 52 us = 75 us (1.43x)
-  b=1 sk=4096: dequant 53 us + FA4 54 us = 105 us (1.94x)
-  b=1 sk=8192: dequant 100 us + FA4 100 us = 201 us (2.02x)
-  b=1 sk=16384: dequant 198 us + FA4 191 us = 387 us (2.02x)
-  b=8 sk=4096: dequant 389 us + FA4 56 us = 448 us (7.94x)
-  b=16 sk=4096: dequant 769 us + FA4 92 us = 868 us (9.46x)
+### v7 — Separate CUDA C kernel (non-paged FA4, pack_gqa=False)
 
-## A100 80GB (SM80)
+  b=1 sk=2048: dequant 60 + attn 124 = 188 us (1.51x)
+  b=1 sk=4096: dequant 110 + attn 234 = 342 us (1.46x)
+  b=1 sk=8192: dequant 212 + attn 459 = 668 us (1.46x)
+  b=1 sk=16384: dequant 417 + attn 906 = 1180 us (1.30x)
+  b=8 sk=4096: dequant 642 + attn 446 = 1084 us (2.43x)
+  b=16 sk=4096: dequant 1276 + attn 713 = 2017 us (2.83x)
 
-Pending.
+### Findings
+
+A100 shows BETTER overhead ratios than H100 (1.30-1.51x vs 1.46-2.02x for b=1). This is because A100 has lower HBM bandwidth (2.0 vs 3.35 TB/s), making attention itself slower relative to dequant compute. The dequant overhead is a smaller fraction of total time. At sk=16384, overhead is only 1.30x — the 4x memory reduction is nearly free.
+
+v5 fused approach not available on A100 (paged KV requires SM90+).
+
+---
 
 ## H200 (SM90)
 
-Pending.
+Not available on Modal.
 
 ## B200 (SM100)
 
-Pending.
+Not available on Modal.
+
+---
+
+## Summary
+
+| GPU | Version | b=1 sk=4096 | b=1 sk=16384 | Best case |
+|-----|---------|-------------|--------------|-----------|
+| H100 | v5 fused | 4.2x | 5.4x | 2.3x (sk=2048) |
+| H100 | v7 separate | 1.77x | 2.02x | 1.46x (sk=2048) |
+| A100 | v7 separate | 1.46x | 1.30x | 1.30x (sk=16384) |
+
+A100 benefits more from TurboQuant because it's more bandwidth-constrained. The 4x KV compression saves proportionally more time when bandwidth is the bottleneck.
