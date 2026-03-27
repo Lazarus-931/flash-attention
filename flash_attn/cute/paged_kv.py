@@ -209,7 +209,6 @@ class PagedKVManager(ParamsBase):
         tXc0X = self.gmem_thr_copy_KV.get_slice(0).partition_S(cX)
 
         if const_expr(self.quantized):
-            cb = self.quantizer.make_codebook()
             elems_per_int32 = 32 // self.quantizer.num_bits
             num_packed_int32 = head_dim // elems_per_int32
 
@@ -259,7 +258,7 @@ class PagedKVManager(ParamsBase):
                         tPrPacked[j] = mX_packed[j]
 
                 tPrDequant = cute.make_rmem_tensor((head_dim,), self.mK_paged.element_type)
-                self.quantizer.dequantize(tPrPacked, tPrDequant, num_packed_int32, cb)
+                self.quantizer.dequantize(tPrPacked, tPrDequant, num_packed_int32)
 
                 for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     ki = tXcX[0, 0, k][1] // self.async_copy_elems

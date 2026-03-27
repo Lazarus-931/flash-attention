@@ -25,15 +25,12 @@ class TurboQuant:
         self.mask = (1 << num_bits) - 1
         self.num_entries = len(self.entries)
 
-    def make_codebook(self):
-        cb = cute.make_rmem_tensor((self.num_entries,), self.dtype)
-        for i in cutlass.range_constexpr(self.num_entries):
-            cb[i] = self.dtype(self.entries[i])
-        return cb
-
     @cute.jit
-    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor,
-                   num_int32s: Int32, cb: cute.Tensor):
+    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor, num_int32s: Int32):
+        cb = cute.make_rmem_tensor((self.num_entries,), self.dtype)
+        for c in cutlass.range_constexpr(self.num_entries):
+            cb[c] = self.dtype(self.entries[c])
+
         for i in cutlass.range_constexpr(num_int32s):
             packed_val = packed_data[i]
             for j in cutlass.range_constexpr(self.elems_per_int32):
