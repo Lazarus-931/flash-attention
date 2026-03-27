@@ -250,22 +250,18 @@ class PagedKVManager(ParamsBase):
                     Int32, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=4
                 )
                 mX_packed_row = cute.make_tensor(packed_gmem_ptr, cute.make_layout((num_packed_int32,)))
-                packed_per_copy = self.async_copy_elems // elems_per_int32
-                if packed_per_copy < 1:
-                    packed_per_copy = 1
 
                 for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     col_offset = tXcX[0, 0, k][1]
                     packed_col = col_offset // elems_per_int32
 
-                    tPrChunk = cute.make_rmem_tensor((packed_per_copy,), Int32)
-                    tPrChunk.fill(Int32(0))
+                    tPrChunk = cute.make_rmem_tensor((1,), Int32)
+                    tPrChunk[0] = Int32(0)
                     if row_valid:
-                        for p in cutlass.range_constexpr(packed_per_copy):
-                            tPrChunk[p] = mX_packed_row[packed_col + p]
+                        tPrChunk[0] = mX_packed_row[packed_col]
 
-                    tPrDeq = cute.make_rmem_tensor((self.async_copy_elems,), self.mK_paged.element_type)
-                    self.quantizer.dequantize(tPrChunk, tPrDeq, packed_per_copy)
+                    tPrDeq = cute.make_rmem_tensor((elems_per_int32,), self.mK_paged.element_type)
+                    self.quantizer.dequantize(tPrChunk, tPrDeq, 1)
 
                     tXsX_k = tXsX[None, m, k]
                     for elem in cutlass.range_constexpr(cute.size(tXsX_k)):
