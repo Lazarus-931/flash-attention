@@ -452,10 +452,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        smem_cb = None
-        if const_expr(self.quantized):
-            cb_layout = cute.make_layout((self.quantizer.num_entries,))
-            smem_cb = smem.allocate_tensor(mK.element_type, cb_layout, byte_alignment=16)
+        num_cb_entries = self.quantizer.num_entries if const_expr(self.quantized) else 1
+        cb_layout = cute.make_layout((num_cb_entries,))
+        smem_cb = smem.allocate_tensor(mK.element_type, cb_layout, byte_alignment=16)
 
         # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
