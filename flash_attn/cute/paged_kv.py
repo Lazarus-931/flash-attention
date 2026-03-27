@@ -208,6 +208,11 @@ class PagedKVManager(ParamsBase):
         tXcX = self.gmem_thr_copy_KV.partition_S(cX)
         tXc0X = self.gmem_thr_copy_KV.get_slice(0).partition_S(cX)
 
+        if const_expr(self.quantized):
+            cb = self.quantizer.make_codebook()
+            elems_per_int32 = 32 // self.quantizer.num_bits
+            num_packed_int32 = head_dim // elems_per_int32
+
         seqlenk_row_limit = (
             self.seqlen_k - n_block * self.n_block_size - tXcX[0][0] if n_block >= 0 else 0
         )
@@ -242,29 +247,20 @@ class PagedKVManager(ParamsBase):
                         pred=should_load,
                     )
             else:
-
-                # Vectorized load: read packed data as Int32 (4 bytes each).
-                # For 4-bit quant, head_dim=128: 64 packed bytes = 16 x Int32.
-                elems_per_int32 = 32 // self.quantizer.num_bits  # e.g. 8 for 4-bit
-                num_packed_int32 = head_dim // elems_per_int32
-
                 packed_gmem_ptr = cute.make_ptr(
                     Int32, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=4
                 )
                 mX_packed = cute.make_tensor(packed_gmem_ptr, cute.make_layout((num_packed_int32,)))
 
-                # Load packed Int32s into registers (vectorized: each load is 4 bytes)
                 tPrPacked = cute.make_rmem_tensor((num_packed_int32,), Int32)
                 tPrPacked.fill(Int32(0))
                 if row_valid:
                     for j in cutlass.range_constexpr(num_packed_int32):
                         tPrPacked[j] = mX_packed[j]
 
-                # Dequant: unroll over Int32 chunks, unpack + codebook lookup
                 tPrDequant = cute.make_rmem_tensor((head_dim,), self.mK_paged.element_type)
-                self.quantizer.dequantize(tPrPacked, tPrDequant, num_packed_int32)
+                self.quantizer.dequantize(tPrPacked, tPrDequant, num_packed_int32, cb)
 
-                # Store dequantized values to shared memory
                 for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     ki = tXcX[0, 0, k][1] // self.async_copy_elems
                     tXsX_k = tXsX[None, m, k]

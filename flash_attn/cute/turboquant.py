@@ -3,8 +3,6 @@ import cutlass  # type: ignore
 import cutlass.cute as cute  # type: ignore
 from cutlass import Int32, Float32  # type: ignore
 
-# Lloyd-Max centroids for the standard normal distribution
-
 CODEBOOK = {
     1: [-0.79788456, 0.79788456],
     2: [-1.51041761, -0.45278003, 0.45278003, 1.51041761],
@@ -19,40 +17,25 @@ CODEBOOK = {
 
 class TurboQuant:
     def __init__(self, num_bits: int, dtype):
-        assert num_bits in CODEBOOK, f"Unsupported num_bits={num_bits}, must be one of {list(CODEBOOK.keys())}"
+        assert num_bits in CODEBOOK
         self.num_bits = num_bits
         self.dtype = dtype
         self.entries = CODEBOOK[num_bits]
-        self.elems_per_int32 = 32 // num_bits  # e.g. 8 for 4-bit
+        self.elems_per_int32 = 32 // num_bits
         self.mask = (1 << num_bits) - 1
+        self.num_entries = len(self.entries)
+
+    def make_codebook(self):
+        cb = cute.make_rmem_tensor((self.num_entries,), self.dtype)
+        for i in cutlass.range_constexpr(self.num_entries):
+            cb[i] = self.dtype(self.entries[i])
+        return cb
 
     @cute.jit
-    def unpack(self, packed_val: Int32, index: Int32) -> Int32:
-        shift = index * self.num_bits
-        return (packed_val >> shift) & self.mask
-
-    @cute.jit
-    def codebook_lookup(self, code: Int32):
-        """Compile-time unrolled codebook lookup via if/else chain."""
-        result = self.dtype(self.entries[0])
-        for c in cutlass.range_constexpr(len(self.entries)):
-            if code == c:
-                result = self.dtype(self.entries[c])
-        return result
-
-    @cute.jit
-    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor, num_int32s: Int32):
-        """Dequantize packed Int32 data via codebook lookup.
-
-        Args:
-            packed_data: Register tensor of packed Int32 values.
-            output: Register tensor to write dequantized fp16/bf16 values.
-            num_int32s: Number of Int32 elements in packed_data.
-        """
-        # Fully unrolled: iterate over each Int32, unpack all sub-elements
+    def dequantize(self, packed_data: cute.Tensor, output: cute.Tensor,
+                   num_int32s: Int32, cb: cute.Tensor):
         for i in cutlass.range_constexpr(num_int32s):
             packed_val = packed_data[i]
             for j in cutlass.range_constexpr(self.elems_per_int32):
-                code = self.unpack(packed_val, j)
-                out_idx = i * self.elems_per_int32 + j
-                output[out_idx] = self.codebook_lookup(code)
+                code = (packed_val >> (j * self.num_bits)) & self.mask
+                output[i * self.elems_per_int32 + j] = cb[code]
