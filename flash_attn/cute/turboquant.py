@@ -44,7 +44,7 @@ class TurboQuant:
 
         cb = cute.make_rmem_tensor((len(self.entries),), self.dtype)
         for i in cutlass.range_constexpr(len(self.entries)):
-            cb[i] = self.entries[i]
+            cb[i] = self.dtype(self.entries[i])
 
         for i in cutlass.range(num_elements, unroll=1):
             pack_idx = i // elems_per_pack
